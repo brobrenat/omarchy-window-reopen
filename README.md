@@ -55,6 +55,13 @@ window-reopen list     # show remembered windows, newest last
 
 History lives in `$XDG_RUNTIME_DIR/window-reopen/history` (usually `/run/user/<uid>`): readable only by you and wiped at logout. It contains the full command lines of closed windows, so it is never written to permanent storage.
 
+## Security
+
+- History holds full command lines, so it is kept in `$XDG_RUNTIME_DIR` (owner-only, wiped at logout) and created with `umask 077`.
+- The script refuses to run if its storage directory is a symlink or not owned by you, so another account cannot read or redirect it.
+- Folder names and window classes containing tabs or newlines are not recorded, so they cannot forge a history entry that reopen would run.
+- History from 1.0.0 is imported only if it is a regular file you own, then deleted.
+
 ## Testing
 
 `tests/live-test.sh` runs on a live Hyprland session. It opens and closes only its own marked windows, so it is safe to run while you work.

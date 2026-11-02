@@ -23,19 +23,41 @@ STASH=special:window-reopen
 STATE_DIR=${WINDOW_REOPEN_DIR:-${XDG_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}}/window-reopen}
 HISTORY=$STATE_DIR/history
 
+refuse() {
+  echo "window-reopen: refusing unsafe storage: $1" >&2
+  exit 1
+}
+
+# Use only storage we fully own. If XDG_RUNTIME_DIR points somewhere shared
+# (it falls back to /tmp on some systems), another account could pre-create
+# this directory to read the history, or plant symlinks to redirect writes.
+mkdir -p "$STATE_DIR" 2>/dev/null
+[[ -d $STATE_DIR && ! -L $STATE_DIR && -O $STATE_DIR ]] || refuse "$STATE_DIR is not a directory owned by you"
+chmod 700 "$STATE_DIR" || refuse "cannot make $STATE_DIR private"
+for f in "$HISTORY" "$HISTORY.tmp" "$STATE_DIR/lock"; do
+  [[ -L $f ]] && refuse "$f is a symlink"
+  [[ -e $f && ! -O $f ]] && refuse "$f is not owned by you"
+done
+chmod -f 600 "$HISTORY"
+
 # Version 1.0.0 kept a world-readable copy in ${XDG_STATE_HOME:-~/.local/state}.
 # Check both locations: the keybinding and a shell may see different XDG_STATE_HOME.
+# Import only a regular file we own: history entries are commands that reopen runs.
 if [[ -z ${WINDOW_REOPEN_DIR:-} ]]; then
   for legacy_dir in "${XDG_STATE_HOME:-$HOME/.local/state}/window-reopen" "$HOME/.local/state/window-reopen"; do
-    [[ -d $legacy_dir && $legacy_dir != "$STATE_DIR" ]] || continue
-    mkdir -p "$STATE_DIR"
-    [[ -f $legacy_dir/history && ! -f $HISTORY ]] && cat "$legacy_dir/history" >"$HISTORY"
-    rm -f "$legacy_dir/history" "$legacy_dir/history.tmp"
+    [[ -d $legacy_dir && ! -L $legacy_dir && -O $legacy_dir && $legacy_dir != "$STATE_DIR" ]] || continue
+    legacy=$legacy_dir/history
+    if [[ -f $legacy && ! -L $legacy && -O $legacy && ! -s $HISTORY ]]; then
+      cat "$legacy" >"$HISTORY"
+    fi
+    rm -f "$legacy" "$legacy.tmp"
     rmdir "$legacy_dir" 2>/dev/null
   done
 fi
-chmod -f 700 "$STATE_DIR"
-chmod -f 600 "$HISTORY"
+
+# History fields are tab-separated, one entry per line: a tab or newline inside a
+# field (a crafted folder name, say) could forge an entry whose command reopen runs.
+has_separator() { [[ $1 == *[$'\t\n']* ]]; }
 
 dispatch() { hyprctl dispatch "$1" >/dev/null 2>&1; }
 
@@ -122,10 +144,11 @@ launch_info() {
   exe=$(basename "$(tr '\0' '\n' <"/proc/$pid/cmdline" | head -n 1)")
   # Own process (foot, omawrite): its command line keeps args and folder.
   # Shared process (a Chromium web app): use the matching desktop entry.
-  if [[ ${exe,,} != "${class,,}" ]] && desktop=$(desktop_id_for_class "$class"); then
+  if [[ ${exe,,} != "${class,,}" ]] && desktop=$(desktop_id_for_class "$class") && ! has_separator "$desktop"; then
     printf 'desktop\t%s\t-\t%s' "$class" "$desktop"
   else
     cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "$HOME")
+    has_separator "$cwd" && cwd=$HOME
     printf 'cmd\t%s\t%s\t%s' "$class" "$cwd" "$(base64 -w0 "/proc/$pid/cmdline")"
   fi
 }
@@ -141,6 +164,7 @@ close_window() {
   class=$(jq -r '.class // empty' <<<"$window")
   pid=$(jq -r '.pid // 0' <<<"$window")
   valid_address "$address" || return
+  has_separator "$class" && class=${class//[$'\t\n']/_}
 
   if [[ -z $class || $pid -le 0 || ! -r /proc/$pid/cmdline ]]; then
     close_for_real "$address"

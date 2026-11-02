@@ -140,6 +140,40 @@ n=$(close_expire_reopen "$a")
   ok "relaunched from wr-test-window-reopen.desktop" || bad "desktop relaunch failed"
 kill_window "$n"
 
+echo "8. storage that is a symlink is refused, nothing is written through it"
+mkdir -p "$WORK/target"
+chmod 755 "$WORK/target"
+ln -s "$WORK/target" "$WORK/link"
+WINDOW_REOPEN_DIR=$WORK/link "$BIN" list 2>&1 | grep -q "refusing unsafe storage" && ok "refused" || bad "symlinked storage accepted"
+[[ -z $(ls -A "$WORK/target") && $(stat -c %a "$WORK/target") == 755 ]] &&
+  ok "symlink target untouched" || bad "symlink target modified ($(stat -c %a "$WORK/target"))"
+
+echo "9. a folder name with a newline and tabs cannot forge a history entry"
+: >"$WINDOW_REOPEN_DIR/history"
+EVIL="$WORK/x"$'\n''0xdead'$'\t''cmd'$'\t''evil'
+mkdir -p "$EVIL"
+# A non-terminal app that stays in its folder (foot moves itself to /), so the
+# window's own folder is what gets recorded.
+if command -v mpv >/dev/null; then
+  a=$(new_window_after bash -c 'cd "$1" && setsid -f mpv --idle=yes --force-window=yes --title=wr-test --mute=yes >/dev/null 2>&1' _ "$EVIL")
+else
+  echo "  skip mpv not installed"
+  a=""
+fi
+if [[ -z $a ]] && ! command -v mpv >/dev/null; then
+  :
+elif [[ -n $a && $(readlink /proc/"$(pid_of "$a")"/cwd) == "$EVIL" ]]; then
+  WINDOW_REOPEN_TTL=600 "$BIN" close "$a"
+  sleep 0.3
+  [[ $(wc -l <"$WINDOW_REOPEN_DIR/history") == 1 && $(awk -F'\t' '{ print NF }' "$WINDOW_REOPEN_DIR/history") == 6 ]] &&
+    ok "one well-formed entry, no forged line" || bad "history was split: $(wc -l <"$WINDOW_REOPEN_DIR/history") lines"
+  "$BIN" reopen
+  sleep 0.3
+else
+  bad "could not open a window inside the crafted folder"
+fi
+for w in $(addresses); do is_test_window "$w" && kill_window "$w"; done
+
 rm -rf "$WORK"
 echo "passed: $PASS, failed: $FAIL"
 ((FAIL == 0))

@@ -23,13 +23,16 @@ STASH=special:window-reopen
 STATE_DIR=${WINDOW_REOPEN_DIR:-${XDG_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}}/window-reopen}
 HISTORY=$STATE_DIR/history
 
-# Versions up to 1.0.0 kept a world-readable copy in ~/.local/state: move it here once.
-LEGACY_DIR=$HOME/.local/state/window-reopen
-if [[ -z ${WINDOW_REOPEN_DIR:-} && -d $LEGACY_DIR && $LEGACY_DIR != "$STATE_DIR" ]]; then
-  mkdir -p "$STATE_DIR"
-  [[ -f $LEGACY_DIR/history && ! -f $HISTORY ]] && cat "$LEGACY_DIR/history" >"$HISTORY"
-  rm -f "$LEGACY_DIR/history" "$LEGACY_DIR/history.tmp"
-  rmdir "$LEGACY_DIR" 2>/dev/null
+# Version 1.0.0 kept a world-readable copy in ${XDG_STATE_HOME:-~/.local/state}.
+# Check both locations: the keybinding and a shell may see different XDG_STATE_HOME.
+if [[ -z ${WINDOW_REOPEN_DIR:-} ]]; then
+  for legacy_dir in "${XDG_STATE_HOME:-$HOME/.local/state}/window-reopen" "$HOME/.local/state/window-reopen"; do
+    [[ -d $legacy_dir && $legacy_dir != "$STATE_DIR" ]] || continue
+    mkdir -p "$STATE_DIR"
+    [[ -f $legacy_dir/history && ! -f $HISTORY ]] && cat "$legacy_dir/history" >"$HISTORY"
+    rm -f "$legacy_dir/history" "$legacy_dir/history.tmp"
+    rmdir "$legacy_dir" 2>/dev/null
+  done
 fi
 chmod -f 700 "$STATE_DIR"
 chmod -f 600 "$HISTORY"

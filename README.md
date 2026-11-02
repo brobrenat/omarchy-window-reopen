@@ -35,6 +35,17 @@ o.bind("SUPER + ALT + W", "Reopen closed window", "~/.config/omarchy/plugins/io.
 -- window-reopen: end
 ```
 
+## Uninstall
+
+1. Bring back any hidden windows first: press `SUPER + ALT + W` until it says "Nothing to reopen". Windows still hidden after removal stay hidden until their timer closes them.
+2. Delete the block between `-- window-reopen: begin` and `-- window-reopen: end` in `~/.config/hypr/bindings.lua`. `SUPER + W` returns to Omarchy's normal close.
+3. Remove the plugin and its history:
+
+```bash
+omarchy plugin remove io.github.brobrenat.window-reopen
+rm -rf ~/.local/state/window-reopen
+```
+
 ## Commands
 
 ```bash
@@ -51,7 +62,7 @@ History lives in `~/.local/state/window-reopen/history`.
 
 ## Requirements
 
-Omarchy 4 (Hyprland with Lua config), `jq`, `xdg-terminal-exec` (ships with Omarchy). No root access or extra packages.
+Omarchy 4 (Hyprland with Lua config). Uses `hyprctl`, `jq`, `xdg-terminal-exec`, `uwsm-app`, `notify-send` and `setsid`, which all ship with Omarchy. `tmux` and `herdr` are optional: they are only used when a closed terminal was running them. No root access, extra packages or network access.
 
 ## License
 

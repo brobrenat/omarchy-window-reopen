@@ -1,0 +1,179 @@
+#!/bin/bash
+# Undo for closed windows in Hyprland.
+#   window-reopen close [address]  hide the focused (or given) window instead of closing it
+#   window-reopen reopen  bring back the most recently closed window (repeat to go further back)
+#   window-reopen list    show remembered windows, newest last
+#
+# A "closed" window waits, still running, in a hidden special workspace, so
+# reopening resumes it exactly (terminal folder, scrollback, unsaved text).
+# After TTL_SECONDS, or once more than MAX_HIDDEN windows wait, the oldest is
+# really closed; reopening it then relaunches the app fresh instead.
+
+set -u
+
+TTL_SECONDS=${WINDOW_REOPEN_TTL:-600}
+MAX_HIDDEN=5
+MAX_ENTRIES=20
+STASH=special:window-reopen
+STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/window-reopen
+HISTORY=$STATE_DIR/history
+
+dispatch() { hyprctl dispatch "$1" >/dev/null 2>&1; }
+
+window_on_stash() {
+  hyprctl clients -j | jq -e --arg a "$1" --arg s "$STASH" \
+    'any(.[]; .address == $a and .workspace.name == $s)' >/dev/null
+}
+
+close_for_real() { dispatch "hl.dsp.window.close({ window = \"address:$1\" })"; }
+
+# Desktop entry whose StartupWMClass matches the window class. Web apps share
+# Chromium's process, so their own command line would reopen the plain browser.
+desktop_id_for_class() {
+  local dir file
+  for dir in "${XDG_DATA_HOME:-$HOME/.local/share}/applications" /usr/local/share/applications /usr/share/applications; do
+    [[ -d $dir ]] || continue
+    file=$(grep -lxF "StartupWMClass=$1" "$dir"/*.desktop 2>/dev/null | head -n 1)
+    [[ -n $file ]] && { basename "$file"; return 0; }
+  done
+  return 1
+}
+
+TERMINALS=" foot alacritty kitty ghostty com.mitchellh.ghostty "
+
+# Child processes, breadth-first, so the outermost tmux/herdr client comes first.
+descendants() {
+  local queue=("$1") next p c
+  while ((${#queue[@]})); do
+    next=()
+    for p in "${queue[@]}"; do
+      for c in $(cat /proc/"$p"/task/*/children 2>/dev/null); do
+        echo "$c"
+        next+=("$c")
+      done
+    done
+    queue=("${next[@]}")
+  done
+}
+
+# NUL-separated command that brings a terminal back to where it was:
+# reattach its tmux session, rerun its herdr client (herdr reattaches its
+# persistent session), or else open a shell in the folder the shell was in.
+terminal_command() {
+  local pid=$1 child session first
+  for child in $(descendants "$pid"); do
+    case $(cat /proc/"$child"/comm 2>/dev/null) in
+    tmux*) # tmux renames its client process to "tmux: client"
+      session=$(tmux list-clients -F $'#{client_pid}\t#{session_name}' 2>/dev/null |
+        awk -F'\t' -v p="$child" '$1 == p { print $2; exit }')
+      if [[ -n $session ]]; then
+        printf '%s\0' xdg-terminal-exec tmux attach-session -t "=$session"
+        return
+      fi
+      ;;
+    herdr)
+      printf '%s\0' xdg-terminal-exec
+      cat /proc/"$child"/cmdline
+      return
+      ;;
+    esac
+  done
+  first=$(descendants "$pid" | head -n 1)
+  printf '%s\0' xdg-terminal-exec "--dir=$(readlink /proc/"${first:-$pid}"/cwd 2>/dev/null || echo "$HOME")"
+}
+
+# How to relaunch the app if the hidden window is gone by the time it is reopened.
+launch_info() {
+  local class=$1 pid=$2 exe desktop cwd
+  if [[ $TERMINALS == *" ${class,,} "* ]]; then
+    printf 'cmd\t%s\t%s\t%s' "$class" "$HOME" "$(terminal_command "$pid" | base64 -w0)"
+    return
+  fi
+  exe=$(basename "$(tr '\0' '\n' <"/proc/$pid/cmdline" | head -n 1)")
+  # Own process (foot, omawrite): its command line keeps args and folder.
+  # Shared process (a Chromium web app): use the matching desktop entry.
+  if [[ ${exe,,} != "${class,,}" ]] && desktop=$(desktop_id_for_class "$class"); then
+    printf 'desktop\t%s\t-\t%s' "$class" "$desktop"
+  else
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "$HOME")
+    printf 'cmd\t%s\t%s\t%s' "$class" "$cwd" "$(base64 -w0 "/proc/$pid/cmdline")"
+  fi
+}
+
+close_window() {
+  local window address class pid hidden
+  if [[ -n ${1:-} ]]; then
+    window=$(hyprctl clients -j | jq --arg a "$1" '.[] | select(.address == $a)')
+  else
+    window=$(hyprctl activewindow -j 2>/dev/null)
+  fi
+  address=$(jq -r '.address // empty' <<<"$window")
+  class=$(jq -r '.class // empty' <<<"$window")
+  pid=$(jq -r '.pid // 0' <<<"$window")
+  [[ -n $address ]] || return
+
+  if [[ -z $class || $pid -le 0 || ! -r /proc/$pid/cmdline ]]; then
+    close_for_real "$address"
+    return
+  fi
+
+  mkdir -p "$STATE_DIR"
+  printf '%s\t%s\n' "$address" "$(launch_info "$class" "$pid")" >>"$HISTORY"
+  tail -n "$MAX_ENTRIES" "$HISTORY" >"$HISTORY.tmp" && mv "$HISTORY.tmp" "$HISTORY"
+
+  dispatch "hl.dsp.window.move({ workspace = \"$STASH\", follow = false, window = \"address:$address\" })"
+  setsid -f "$0" expire "$address" >/dev/null 2>&1
+
+  # Keep at most MAX_HIDDEN windows waiting; close the oldest beyond that.
+  mapfile -t hidden < <(cut -f1 "$HISTORY" | while read -r a; do window_on_stash "$a" && echo "$a"; done)
+  for ((i = 0; i < ${#hidden[@]} - MAX_HIDDEN; i++)); do close_for_real "${hidden[i]}"; done
+}
+
+launch() {
+  (
+    # Run from inside herdr/tmux, these would make the relaunched multiplexer
+    # think it is nested and refuse to start.
+    unset TMUX TMUX_PANE $(compgen -e | grep '^HERDR_')
+    if command -v uwsm-app >/dev/null; then setsid -f uwsm-app -- "$@" >/dev/null 2>&1
+    else setsid -f "$@" >/dev/null 2>&1; fi
+  )
+}
+
+reopen_window() {
+  local line address kind class cwd payload args workspace
+  line=$(tail -n 1 "$HISTORY" 2>/dev/null)
+  if [[ -z $line ]]; then
+    notify-send -a "Window Reopen" "Nothing to reopen"
+    return 1
+  fi
+  sed -i '$d' "$HISTORY"
+  IFS=$'\t' read -r address kind class cwd payload <<<"$line"
+
+  if window_on_stash "$address"; then
+    workspace=$(hyprctl activeworkspace -j | jq -r '.id')
+    dispatch "hl.dsp.window.move({ workspace = \"$workspace\", follow = true, window = \"address:$address\" })"
+    return
+  fi
+
+  case $kind in
+  desktop) launch "$payload" ;;
+  cmd)
+    mapfile -d '' args < <(base64 -d <<<"$payload")
+    [[ ${#args[@]} -gt 0 ]] || return 1
+    (cd "$cwd" 2>/dev/null || cd "$HOME"; launch "${args[@]}")
+    ;;
+  esac
+}
+
+expire_window() {
+  sleep "$TTL_SECONDS"
+  window_on_stash "$1" && close_for_real "$1"
+}
+
+case "${1:-}" in
+close) close_window "${2:-}" ;;
+reopen) reopen_window ;;
+expire) expire_window "${2:?address}" ;;
+list) cut -f1,2,3 "$HISTORY" 2>/dev/null ;;
+*) echo "Usage: window-reopen <close|reopen|list>" >&2; exit 1 ;;
+esac

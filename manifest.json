@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.brobrenat.window-reopen",
+  "name": "Window Reopen",
+  "version": "1.0.0",
+  "author": "Brainard Setiawan",
+  "license": "MIT",
+  "description": "Undo for closed windows: reopen the apps you closed with a keybinding, newest first.",
+  "kinds": ["service"],
+  "entryPoints": { "service": "Service.qml" }
+}

@@ -39,12 +39,23 @@ chmod -f 600 "$HISTORY"
 
 dispatch() { hyprctl dispatch "$1" >/dev/null 2>&1; }
 
-window_on_stash() {
-  hyprctl clients -j | jq -e --arg a "$1" --arg s "$STASH" \
-    'any(.[]; .address == $a and .workspace.name == $s)' >/dev/null
+# Addresses end up inside Lua dispatch strings: accept only real hex addresses.
+valid_address() { [[ $1 =~ ^0x[0-9a-fA-F]+$ ]]; }
+
+# Serialize history changes: closing several windows quickly runs this script in parallel.
+lock_history() {
+  mkdir -p "$STATE_DIR"
+  exec 9>"$STATE_DIR/lock"
+  flock 9
 }
 
-close_for_real() { dispatch "hl.dsp.window.close({ window = \"address:$1\" })"; }
+# Hyprland reuses addresses, so also match the class recorded when it was hidden.
+window_on_stash() {
+  hyprctl clients -j | jq -e --arg a "$1" --arg c "${2:-}" --arg s "$STASH" \
+    'any(.[]; .address == $a and .workspace.name == $s and ($c == "" or .class == $c))' >/dev/null
+}
+
+close_for_real() { valid_address "$1" && dispatch "hl.dsp.window.close({ window = \"address:$1\" })"; }
 
 # Desktop entry whose StartupWMClass matches the window class. Web apps share
 # Chromium's process, so their own command line would reopen the plain browser.
@@ -120,7 +131,7 @@ launch_info() {
 }
 
 close_window() {
-  local window address class pid hidden
+  local window address class pid hidden token
   if [[ -n ${1:-} ]]; then
     window=$(hyprctl clients -j | jq --arg a "$1" '.[] | select(.address == $a)')
   else
@@ -129,22 +140,27 @@ close_window() {
   address=$(jq -r '.address // empty' <<<"$window")
   class=$(jq -r '.class // empty' <<<"$window")
   pid=$(jq -r '.pid // 0' <<<"$window")
-  [[ -n $address ]] || return
+  valid_address "$address" || return
 
   if [[ -z $class || $pid -le 0 || ! -r /proc/$pid/cmdline ]]; then
     close_for_real "$address"
     return
   fi
 
-  mkdir -p "$STATE_DIR"
-  printf '%s\t%s\n' "$address" "$(launch_info "$class" "$pid")" >>"$HISTORY"
+  lock_history
+  # The token ties the expiry timer to this hide only: if the window is reopened
+  # and hidden again, the earlier timer finds its token gone and does nothing.
+  token=$(date +%s%N)
+  printf '%s\t%s\t%s\n' "$address" "$(launch_info "$class" "$pid")" "$token" >>"$HISTORY"
   tail -n "$MAX_ENTRIES" "$HISTORY" >"$HISTORY.tmp" && mv "$HISTORY.tmp" "$HISTORY"
 
   dispatch "hl.dsp.window.move({ workspace = \"$STASH\", follow = false, window = \"address:$address\" })"
-  setsid -f "$0" expire "$address" >/dev/null 2>&1
+  setsid -f "$0" expire "$address" "$token" >/dev/null 2>&1 9>&- # the timer must not hold the lock
 
   # Keep at most MAX_HIDDEN windows waiting; close the oldest beyond that.
-  mapfile -t hidden < <(cut -f1 "$HISTORY" | while read -r a; do window_on_stash "$a" && echo "$a"; done)
+  # Count each address once, at its newest entry (addresses get reused).
+  mapfile -t hidden < <(tac "$HISTORY" | awk -F'\t' '!seen[$1]++ { print $1 "\t" $3 }' | tac |
+    while IFS=$'\t' read -r a c; do window_on_stash "$a" "$c" && echo "$a"; done)
   for ((i = 0; i < ${#hidden[@]} - MAX_HIDDEN; i++)); do close_for_real "${hidden[i]}"; done
 }
 
@@ -153,23 +169,27 @@ launch() {
     # Run from inside herdr/tmux, these would make the relaunched multiplexer
     # think it is nested and refuse to start.
     unset TMUX TMUX_PANE $(compgen -e | grep '^HERDR_')
+    exec 9>&- # a relaunched app must not keep the history lock
     if command -v uwsm-app >/dev/null; then setsid -f uwsm-app -- "$@" >/dev/null 2>&1
+    elif [[ $1 == *.desktop ]]; then setsid -f gtk-launch "${1%.desktop}" >/dev/null 2>&1
     else setsid -f "$@" >/dev/null 2>&1; fi
   )
 }
 
 reopen_window() {
-  local line address kind class cwd payload args workspace
+  local line address kind class cwd payload token args workspace
+  lock_history
   line=$(tail -n 1 "$HISTORY" 2>/dev/null)
   if [[ -z $line ]]; then
     notify-send -a "Window Reopen" "Nothing to reopen"
     return 1
   fi
   sed -i '$d' "$HISTORY"
-  IFS=$'\t' read -r address kind class cwd payload <<<"$line"
+  IFS=$'\t' read -r address kind class cwd payload token <<<"$line"
 
-  if window_on_stash "$address"; then
+  if valid_address "$address" && window_on_stash "$address" "$class"; then
     workspace=$(hyprctl activeworkspace -j | jq -r '.id')
+    [[ $workspace =~ ^-?[0-9]+$ ]] || return 1
     dispatch "hl.dsp.window.move({ workspace = \"$workspace\", follow = true, window = \"address:$address\" })"
     return
   fi
@@ -185,14 +205,20 @@ reopen_window() {
 }
 
 expire_window() {
+  local address=$1 token=${2:-}
   sleep "$TTL_SECONDS"
-  window_on_stash "$1" && close_for_real "$1"
+  lock_history
+  # No token: a timer started by 1.0.x, which did not record one.
+  if [[ -n $token ]]; then
+    grep -q $'\t'"$token"'$' "$HISTORY" 2>/dev/null || return 0
+  fi
+  window_on_stash "$address" && close_for_real "$address"
 }
 
 case "${1:-}" in
 close) close_window "${2:-}" ;;
 reopen) reopen_window ;;
-expire) expire_window "${2:?address}" ;;
+expire) expire_window "${2:?address}" "${3:-}" ;;
 list) cut -f1,2,3 "$HISTORY" 2>/dev/null ;;
 *) echo "Usage: window-reopen <close|reopen|list>" >&2; exit 1 ;;
 esac

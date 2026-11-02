@@ -102,6 +102,44 @@ if command -v herdr >/dev/null; then
   herdr session delete wr-test-herdr >/dev/null 2>&1
 fi
 
+echo "5. an old expiry timer does not close a window that was reopened and hidden again"
+a=$(open_test_window -e bash)
+WINDOW_REOPEN_TTL=3 "$BIN" close "$a"
+sleep 0.5
+timeout 10 "$BIN" reopen || bad "reopen hung or failed (lock held?)"
+sleep 0.5
+WINDOW_REOPEN_TTL=600 "$BIN" close "$a"
+sleep 5
+[[ $(workspace_of "$a") == special:window-reopen ]] && ok "still hidden after the first timer fired" || bad "closed early by the old timer"
+timeout 10 "$BIN" reopen
+sleep 0.5
+kill_window "$a"
+
+echo "6. closing several windows at the same moment keeps every entry"
+w1=$(open_test_window -e bash)
+w2=$(open_test_window -e bash)
+w3=$(open_test_window -e bash)
+for w in "$w1" "$w2" "$w3"; do WINDOW_REOPEN_TTL=600 "$BIN" close "$w" & done
+wait
+sleep 0.5
+[[ $(wc -l <"$WINDOW_REOPEN_DIR/history") == 3 ]] && ok "3 history entries" || bad "history has $(wc -l <"$WINDOW_REOPEN_DIR/history") entries"
+for _ in 1 2 3; do timeout 10 "$BIN" reopen || bad "reopen hung or failed"; sleep 0.3; done
+restored=0
+for w in "$w1" "$w2" "$w3"; do [[ -n $(workspace_of "$w") && $(workspace_of "$w") != special:window-reopen ]] && restored=$((restored + 1)); done
+[[ $restored == 3 ]] && ok "all 3 windows back" || bad "$restored of 3 windows back"
+for w in "$w1" "$w2" "$w3"; do kill_window "$w"; done
+
+echo "7. a window from a desktop entry (like a web app) relaunches through that entry"
+DESKTOP=${XDG_DATA_HOME:-$HOME/.local/share}/applications/wr-test-window-reopen.desktop
+trap 'rm -f "$DESKTOP"' EXIT
+printf '[Desktop Entry]\nType=Application\nName=wr-test\nExec=foot --app-id=wr-test-app --title=wr-test -e bash\nStartupWMClass=wr-test-app\n' >"$DESKTOP"
+a=$(open_test_window --app-id=wr-test-app -e bash)
+old=$(pid_of "$a")
+n=$(close_expire_reopen "$a")
+[[ -n $n && $(pid_of "$n") != "$old" && $(hyprctl clients -j | jq -r --arg a "$n" '.[] | select(.address == $a) | .class') == wr-test-app ]] &&
+  ok "relaunched from wr-test-window-reopen.desktop" || bad "desktop relaunch failed"
+kill_window "$n"
+
 rm -rf "$WORK"
 echo "passed: $PASS, failed: $FAIL"
 ((FAIL == 0))

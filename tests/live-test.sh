@@ -7,7 +7,7 @@ set -u
 BIN=$(cd "$(dirname "$0")/../bin" && pwd)/window-reopen
 WORK=$(mktemp -d)
 mkdir -p "$WORK/sub"
-export XDG_STATE_HOME=$WORK/state # keep test history away from the real one
+export WINDOW_REOPEN_DIR=$WORK/state # keep test history away from the real one
 PASS=0
 FAIL=0
 
@@ -59,6 +59,8 @@ pid=$(pid_of "$a")
 WINDOW_REOPEN_TTL=600 "$BIN" close "$a"
 sleep 0.5
 [[ $(workspace_of "$a") == special:window-reopen ]] && ok "hidden" || bad "not hidden"
+[[ $(stat -c %a "$WINDOW_REOPEN_DIR") == 700 && $(stat -c %a "$WINDOW_REOPEN_DIR/history") == 600 ]] &&
+  ok "history is private (700/600)" || bad "history readable by others"
 "$BIN" reopen
 sleep 0.5
 [[ -n $(workspace_of "$a") && $(workspace_of "$a") != special:window-reopen && $(pid_of "$a") == "$pid" ]] &&

@@ -39,11 +39,10 @@ o.bind("SUPER + ALT + W", "Reopen closed window", "~/.config/omarchy/plugins/io.
 
 1. Bring back any hidden windows first: press `SUPER + ALT + W` until it says "Nothing to reopen". Windows still hidden after removal stay hidden until their timer closes them.
 2. Delete the block between `-- window-reopen: begin` and `-- window-reopen: end` in `~/.config/hypr/bindings.lua`. `SUPER + W` returns to Omarchy's normal close.
-3. Remove the plugin and its history:
+3. Remove the plugin. Its history lives in `$XDG_RUNTIME_DIR/window-reopen` and is wiped at logout.
 
 ```bash
 omarchy plugin remove io.github.brobrenat.window-reopen
-rm -rf ~/.local/state/window-reopen
 ```
 
 ## Commands
@@ -54,7 +53,7 @@ window-reopen reopen   # bring back the most recently closed window
 window-reopen list     # show remembered windows, newest last
 ```
 
-History lives in `~/.local/state/window-reopen/history`.
+History lives in `$XDG_RUNTIME_DIR/window-reopen/history` (usually `/run/user/<uid>`): readable only by you and wiped at logout. It contains the full command lines of closed windows, so it is never written to permanent storage.
 
 ## Testing
 

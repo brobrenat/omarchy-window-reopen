@@ -10,13 +10,29 @@
 # really closed; reopening it then relaunches the app fresh instead.
 
 set -u
+# History holds full command lines, which can contain secrets: keep every file
+# this script creates readable by the owner only.
+umask 077
 
 TTL_SECONDS=${WINDOW_REOPEN_TTL:-600}
 MAX_HIDDEN=5
 MAX_ENTRIES=20
 STASH=special:window-reopen
-STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/window-reopen
+# Session-only storage: $XDG_RUNTIME_DIR is owner-only and wiped at logout,
+# and window addresses mean nothing in a later session anyway.
+STATE_DIR=${WINDOW_REOPEN_DIR:-${XDG_RUNTIME_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}}/window-reopen}
 HISTORY=$STATE_DIR/history
+
+# Versions up to 1.0.0 kept a world-readable copy in ~/.local/state: move it here once.
+LEGACY_DIR=$HOME/.local/state/window-reopen
+if [[ -z ${WINDOW_REOPEN_DIR:-} && -d $LEGACY_DIR && $LEGACY_DIR != "$STATE_DIR" ]]; then
+  mkdir -p "$STATE_DIR"
+  [[ -f $LEGACY_DIR/history && ! -f $HISTORY ]] && cat "$LEGACY_DIR/history" >"$HISTORY"
+  rm -f "$LEGACY_DIR/history" "$LEGACY_DIR/history.tmp"
+  rmdir "$LEGACY_DIR" 2>/dev/null
+fi
+chmod -f 700 "$STATE_DIR"
+chmod -f 600 "$HISTORY"
 
 dispatch() { hyprctl dispatch "$1" >/dev/null 2>&1; }
 
